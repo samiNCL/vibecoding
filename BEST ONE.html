@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Compass Trainer with Filled Block</title>
+  <style>
+    :root {
+      --grid: 24px;
+      --dial: 160px;
+    }
+    body {
+      margin: 0; padding: 1rem;
+      font-family: sans-serif;
+      background: #f7f7f7;
+      display: flex; justify-content: center;
+    }
+    #container {
+      display: flex; align-items: flex-start; gap: 1.5rem;
+    }
+    #sidebar {
+      display: flex; flex-direction: column; align-items: center;
+    }
+    #compassBox {
+      width: var(--dial); height: var(--dial); position: relative;
+    }
+    #dial {
+      width: 100%; height: 100%;
+      border: 4px solid #222; border-radius: 50%;
+    }
+    #needle {
+      width: 4px; height: calc(var(--dial)/2 - 10px);
+      background: red; position: absolute; left: 50%; top: 10px;
+      transform: translateX(-50%) rotate(0deg);
+      transform-origin: bottom center;
+      transition: transform .25s ease;
+    }
+    canvas {
+      border: 2px solid #444; background: #fff;
+      max-height: calc(100vh - 2rem);
+      max-width: calc(100vw - var(--dial) - 4rem);
+    }
+    #controls { margin-top: .5rem; }
+    .control-group { margin-bottom: .5rem; }
+    button {
+      font-size: 1rem; margin: .25rem; padding: .5rem 1rem;
+      cursor: pointer;
+    }
+    #goalDisplay, #status, #stepCounter, #timerDisplay {
+      margin-top: .5rem; font-size: 1.1rem; text-align: center;
+    }
+    .quiz-box {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%,-50%);
+      background: #fff; border: 2px solid #333; padding: 1rem;
+      z-index: 1000; text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .quiz-box button { margin: .25rem; min-width: 4rem; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="sidebar">
+      <div id="compassBox">
+        <div id="dial"></div>
+        <div id="needle"></div>
+      </div>
+      <div id="controls">
+        <div class="control-group">
+          <button onclick="turn(-1)">⬅️ Left</button>
+          <button onclick="step()">⬆️ Forward</button>
+          <button onclick="turn(1)">➡️ Right</button>
+        </div>
+        <div class="control-group">
+          <button onclick="resetGame()">🔄 Reset</button>
+          <button onclick="randomizeGame()">🎲 Randomize</button>
+        </div>
+        <div class="control-group">
+          <button onclick="testMe()">🧪 Test me</button>
+          <button onclick="startTimer()">⏱ Timer</button>
+          <button onclick="addBlock()">🚧 Add Block</button>
+        </div>
+      </div>
+      <div id="goalDisplay"></div>
+      <div id="status"></div>
+      <div id="stepCounter"></div>
+      <div id="timerDisplay"></div>
+    </div>
+    <canvas id="map" width="600" height="600"></canvas>
+  </div>
+
+  <script>
+    // Config
+    const steps = [[0,1],[1,0],[0,-1],[-1,0]];
+    const names = ["North","East","South","West"];
+    const range = 10;
+
+    // State
+    let dir = 0, pos = {x:0,y:0}, path = [{x:0,y:0}], stepCount = 0;
+    let goal = {x:3,y:4};
+    let timerInterval = null, secondsLeft = 0;
+    let blockedCells = new Set();
+
+    // Refs
+    const cvs = document.getElementById("map"), ctx = cvs.getContext("2d");
+    const needle = document.getElementById("needle");
+
+    // Helpers
+    function gridToPx(gx, gy) {
+      const g = parseInt(getComputedStyle(document.documentElement)
+                         .getPropertyValue('--grid'));
+      return { x: cvs.width/2 + gx*g, y: cvs.height/2 - gy*g };
+    }
+    function cellKey(x,y){ return `${x},${y}`; }
+    function updateTimerDisplay(){
+      document.getElementById("timerDisplay").textContent =
+        secondsLeft>0?`Time left: ${secondsLeft}s`:'';
+    }
+
+    // Draw scene
+    function draw() {
+      ctx.clearRect(0,0,cvs.width,cvs.height);
+      const g = parseInt(getComputedStyle(document.documentElement)
+                         .getPropertyValue('--grid'));
+
+      // grid
+      ctx.strokeStyle="#eee";
+      for(let x=0;x<cvs.width;x+=g){
+        ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,cvs.height);ctx.stroke();
+      }
+      for(let y=0;y<cvs.height;y+=g){
+        ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(cvs.width,y);ctx.stroke();
+      }
+
+      // blocked cells (filled)
+      ctx.fillStyle = 'rgba(200,0,0,0.5)';
+      blockedCells.forEach(key=>{
+        const [bx,by] = key.split(',').map(Number);
+        const {x,y} = gridToPx(bx,by);
+        ctx.fillRect(x-g/2, y-g/2, g, g);
+      });
+
+      // goal
+      const gp = gridToPx(goal.x,goal.y);
+      ctx.fillStyle="#2ecc71";
+      ctx.beginPath();ctx.arc(gp.x,gp.y,6,0,2*Math.PI);ctx.fill();
+      ctx.fillStyle="#000";ctx.fillText("Mosque",gp.x-22,gp.y-10);
+
+      // trail
+      ctx.strokeStyle="#0077cc";ctx.lineWidth=2;ctx.beginPath();
+      path.forEach((p,i)=>{
+        const pt = gridToPx(p.x,p.y);
+        i===0?ctx.moveTo(pt.x,pt.y):ctx.lineTo(pt.x,pt.y);
+      });
+      ctx.stroke();
+
+      // player
+      const pp = gridToPx(pos.x,pos.y);
+      ctx.fillStyle="#e74c3c";ctx.beginPath();
+      ctx.arc(pp.x,pp.y,6,0,2*Math.PI);ctx.fill();
+    }
+
+    // UI update
+    function refreshUI() {
+      needle.style.transform = `translateX(-50%) rotate(${dir*90}deg)`;
+      document.getElementById("goalDisplay").textContent =
+        `🎯 Goal: (${goal.x}, ${goal.y})`;
+      document.getElementById("status").textContent =
+        `Facing: ${names[dir]} | Pos: (${pos.x}, ${pos.y})`;
+      document.getElementById("stepCounter").textContent =
+        `Steps: ${stepCount}`;
+      updateTimerDisplay();
+      draw();
+    }
+
+    // Movement
+    function turn(s){
+      dir = (dir + s + 4) % 4; refreshUI();
+    }
+    function step(){
+      const next = { x: pos.x + steps[dir][0], y: pos.y + steps[dir][1] };
+      if(blockedCells.has(cellKey(next.x,next.y))){
+        return alert("⛔ Blocked by barrier!");
+      }
+      pos = next; path.push({...pos}); stepCount++;
+      refreshUI();
+      if(pos.x===goal.x && pos.y===goal.y){
+        if(timerInterval){
+          clearInterval(timerInterval); timerInterval=null;
+          return alert(secondsLeft>0?"🎉 Congrats! You made it!":"⌛ Too late!");
+        }
+        alert("🎉 You reached the mosque!");
+      }
+    }
+
+    // Controls
+    function resetGame(){
+      dir=0; pos={x:0,y:0}; path=[{x:0,y:0}]; stepCount=0;
+      if(timerInterval){clearInterval(timerInterval); timerInterval=null;}
+      secondsLeft=0; blockedCells.clear();
+      refreshUI();
+    }
+    function randomizeGame(){
+      resetGame();
+      pos.x = Math.floor(Math.random()*(2*range+1))-range;
+      pos.y = Math.floor(Math.random()*(2*range+1))-range;
+      do{
+        goal.x = Math.floor(Math.random()*(2*range+1))-range;
+        goal.y = Math.floor(Math.random()*(2*range+1))-range;
+      } while(goal.x===pos.x && goal.y===pos.y);
+      refreshUI();
+    }
+
+    // Tools
+    function testMe(){ askDirectionQuiz(pos.x,pos.y, dir); }
+    function startTimer(){
+      if(timerInterval) clearInterval(timerInterval);
+      secondsLeft=10; updateTimerDisplay();
+      timerInterval = setInterval(()=>{
+        secondsLeft--; updateTimerDisplay();
+        if(secondsLeft<=0){
+          clearInterval(timerInterval); timerInterval=null;
+          alert("⌛ Too late!");
+        }
+      },1000);
+    }
+    function addBlock(){
+      blockedCells.clear();
+      // choose orientation
+      const vertical = Math.random()<0.5;
+      const minX = Math.min(pos.x,goal.x), maxX = Math.max(pos.x,goal.x);
+      const minY = Math.min(pos.y,goal.y), maxY = Math.max(pos.y,goal.y);
+      if(vertical && minX<maxX){
+        const bx = Math.floor(Math.random()*(maxX-minX))+minX;
+        for(let y=minY; y<=maxY; y++){
+          blockedCells.add(cellKey(bx,y));
+        }
+      } else if(minY<maxY){
+        const by = Math.floor(Math.random()*(maxY-minY))+minY;
+        for(let x=minX; x<=maxX; x++){
+          blockedCells.add(cellKey(x,by));
+        }
+      }
+      refreshUI();
+    }
+
+    // Quiz logic
+    function askDirectionQuiz(x,y,f){
+      const dirs=["North","East","South","West"];
+      const left = dirs[(f+3)%4], right = dirs[(f+1)%4];
+      const box=document.createElement("div");
+      box.className="quiz-box";
+      box.innerHTML=`<h3>At (${x},${y}) facing <b>${dirs[f]}</b></h3>
+        <p>Which is <b>Left</b>?</p>`;
+      [...dirs].sort(()=>Math.random()-.5).forEach(opt=>{
+        const b=document.createElement("button");
+        b.textContent=opt;
+        b.onclick=()=>{
+          b.disabled=true;
+          b.style.background=opt===left?"#8f8":"#f88";
+        };
+        box.appendChild(b);
+      });
+      const p2=document.createElement("p");
+      p2.innerHTML=`<br>Which is <b>Right</b>?`;
+      box.appendChild(p2);
+      [...dirs].sort(()=>Math.random()-.5).forEach(opt=>{
+        const b=document.createElement("button");
+        b.textContent=opt;
+        b.onclick=()=>{
+          b.disabled=true;
+          b.style.background=opt===right?"#8f8":"#f88";
+        };
+        box.appendChild(b);
+      });
+      const cont=document.createElement("button");
+      cont.textContent="✔ Continue";
+      cont.style.marginTop="1rem";
+      cont.onclick=()=>document.body.removeChild(box);
+      box.appendChild(cont);
+      document.body.appendChild(box);
+    }
+
+    // Keyboard
+    document.addEventListener('keydown',e=>{
+      if(e.key==="ArrowLeft"){e.preventDefault();turn(-1);}
+      if(e.key==="ArrowRight"){e.preventDefault();turn(1);}
+      if(e.key==="ArrowUp"){e.preventDefault();step();}
+    });
+
+    // Init
+    refreshUI();
+  </script>
+</body>
+</html>
