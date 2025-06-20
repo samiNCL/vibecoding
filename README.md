@@ -1,1 +1,1 @@
-Go to samomcl website 
+Go to samincl website 
