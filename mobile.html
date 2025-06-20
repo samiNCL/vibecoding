@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Compass Trainer — All-In-One PWA</title>
+
+  <!-- 1) Make it scale & standalone on iOS -->
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Compass">
+
+  <!-- 2) Apple Touch Icon (1×1 placeholder) -->
+  <link rel="apple-touch-icon"
+        href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQYV2NgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=">
+
+  <!-- 3) Styles -->
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      display: flex; flex-direction: column;
+      font: 16px sans-serif; background: #202020; color: #fff;
+      touch-action: none;
+    }
+    #app {
+      flex: 1; display: grid;
+      grid-template-rows: 1fr auto auto auto;
+      height: 100%;
+    }
+    canvas {
+      width: 100%; height: 100%;
+      background: #fff; border-bottom: 2px solid #444;
+    }
+    #dpad {
+      display: grid;
+      grid-template-areas:
+        ". up ."
+        "left . right";
+      gap: 8px; padding: 8px; background: #333;
+    }
+    #dpad button {
+      grid-area: var(--area);
+      width: 56px; height: 56px;
+      background: #fff; color: #000;
+      font-size: 24px; border: none; border-radius: 8px;
+    }
+    #bar {
+      display: flex; flex-wrap: wrap;
+      justify-content: center; gap: 6px;
+      padding: 6px; background: #444;
+    }
+    #bar button {
+      flex: 1 1 30%; min-width: 80px;
+      padding: 6px; border: none; border-radius: 4px;
+      font-size: 14px; background: #222; color: #fff;
+    }
+    #statusBar {
+      text-align: center; padding: 6px;
+      background: #111; font-size: 14px;
+    }
+  </style>
+
+  <!-- 4) Placeholder manifest.json, injected via JS -->
+  <script id="manifest" type="application/json">
+  {
+    "short_name":"Compass",
+    "name":"Compass Route Trainer",
+    "icons":[
+      {
+        "src":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQYV2NgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=",
+        "sizes":"192x192","type":"image/png"
+      }
+    ],
+    "start_url":".",
+    "display":"standalone",
+    "background_color":"#202020",
+    "theme_color":"#202020"
+  }
+  </script>
+
+  <!-- 5) Service worker code, also injected -->
+  <script id="sw" type="application/javascript">
+    const CACHE='compass-v1';
+    const FILES=['/','/index.html'];
+    self.addEventListener('install',e=>{
+      e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES)).then(()=>self.skipWaiting()));
+    });
+    self.addEventListener('fetch',e=>{
+      e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request)));
+    });
+  </script>
+</head>
+<body>
+  <div id="app">
+    <canvas id="map" width="600" height="600"></canvas>
+
+    <div id="dpad">
+      <button id="btnLeft"  style="--area:left">⬅️</button>
+      <button id="btnUp"    style="--area:up">⬆️</button>
+      <button id="btnRight" style="--area:right">➡️</button>
+    </div>
+
+    <div id="bar">
+      <button onclick="resetGame()">🔄 Reset</button>
+      <button onclick="randomizeGame()">🎲 Random</button>
+      <button onclick="testMe()">🧪 Test me</button>
+      <button onclick="startTimer()">⏱ Timer</button>
+      <button onclick="addBlock()">🚧 Block</button>
+    </div>
+
+    <div id="statusBar">
+      <span id="goalDisplay"></span> |
+      <span id="status"></span> |
+      <span id="stepCounter"></span> |
+      <span id="timerDisplay"></span>
+    </div>
+  </div>
+
+  <script>
+  // ── Inject manifest link ──
+  const mf = document.getElementById('manifest').textContent;
+  const mBlob = new Blob([mf],{type:'application/json'});
+  const mURL  = URL.createObjectURL(mBlob);
+  const link = document.createElement('link');
+  link.rel = 'manifest'; link.href = mURL;
+  document.head.appendChild(link);
+
+  // ── Register service worker ──
+  const swCode = document.getElementById('sw').textContent;
+  const swBlob = new Blob([swCode],{type:'application/javascript'});
+  const swURL  = URL.createObjectURL(swBlob);
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register(swURL);
+  }
+
+  // ── Game Code & State ──
+  const steps=[[0,1],[1,0],[0,-1],[-1,0]];
+  const names=["North","East","South","West"];
+  let dir=0,pos={x:0,y:0},path=[{x:0,y:0}],stepCount=0;
+  let goal={x:3,y:4},timerInt=null,secLeft=0,blocked=new Set();
+
+  const canvas=document.getElementById('map'),
+        ctx=canvas.getContext('2d'),
+        goalEl=document.getElementById('goalDisplay'),
+        statEl=document.getElementById('status'),
+        stepEl=document.getElementById('stepCounter'),
+        timEl=document.getElementById('timerDisplay');
+
+  function resize(){
+    const dpr=window.devicePixelRatio||1;
+    const {width,height}=canvas.getBoundingClientRect();
+    canvas.width=width*dpr; canvas.height=height*dpr;
+    ctx.scale(dpr,dpr); draw();
+  }
+  window.addEventListener('resize',resize);
+
+  function gridToPx(x,y){
+    const g=24, cw=canvas.getBoundingClientRect().width,
+          ch=canvas.getBoundingClientRect().height;
+    return { x:cw/2 + x*g, y:ch/2 - y*g };
+  }
+
+  function draw(){
+    const {width:cw,height:ch}=canvas.getBoundingClientRect(),g=24;
+    ctx.clearRect(0,0,cw,ch);
+    ctx.strokeStyle='#666'; for(let i=0;i<cw;i+=g){
+      ctx.beginPath();ctx.moveTo(i,0);ctx.lineTo(i,ch);ctx.stroke();
+    }
+    for(let i=0;i<ch;i+=g){
+      ctx.beginPath();ctx.moveTo(0,i);ctx.lineTo(cw,i);ctx.stroke();
+    }
+    // blocks
+    ctx.fillStyle='rgba(200,0,0,0.5)';
+    blocked.forEach(k=>{
+      const [bx,by]=k.split(',').map(Number),p=gridToPx(bx,by);
+      ctx.fillRect(p.x-g/2,p.y-g/2,g,g);
+    });
+    // path
+    ctx.strokeStyle='#07c';ctx.lineWidth=2;ctx.beginPath();
+    path.forEach((p,i)=>{const c=gridToPx(p.x,p.y);
+      i?ctx.lineTo(c.x,c.y):ctx.moveTo(c.x,c.y);
+    });ctx.stroke();
+    // goal
+    const gp=gridToPx(goal.x,goal.y);
+    ctx.fillStyle='#2ecc71';ctx.beginPath();
+    ctx.arc(gp.x,gp.y,8,0,2*Math.PI);ctx.fill();
+    // player
+    const pp=gridToPx(pos.x,pos.y);
+    ctx.fillStyle='#e74c3c';ctx.beginPath();
+    ctx.arc(pp.x,pp.y,8,0,2*Math.PI);ctx.fill();
+  }
+
+  function refresh(){
+    goalEl.textContent=`Goal:(${goal.x},${goal.y})`;
+    statEl.textContent=`Facing:${names[dir]}`;
+    stepEl.textContent=`Steps:${stepCount}`;
+    timEl.textContent=secLeft>0?`Time:${secLeft}s`:'';
+    draw();
+  }
+
+  function turn(s){ dir=(dir+s+4)%4; refresh(); }
+  function step(){
+    const nx=pos.x+steps[dir][0],ny=pos.y+steps[dir][1];
+    if(blocked.has(`${nx},${ny}`)) return alert('⛔ Blocked!');
+    pos={x:nx,y:ny}; path.push({...pos}); stepCount++;
+    if(nx===goal.x&&ny===goal.y){
+      if(timerInt){clearInterval(timerInt);timerInt=null;
+        return alert(secLeft>0?'🎉 In time!':'⌛ Too late!');}
+      alert('🎉 You made it!');
+    }
+    refresh();
+  }
+
+  function resetGame(){
+    dir=0;pos={x:0,y:0};path=[{x:0,y:0}];stepCount=0;
+    if(timerInt){clearInterval(timerInt);timerInt=null;}secLeft=0;
+    blocked.clear();refresh();
+  }
+  function randomizeGame(){
+    resetGame();
+    pos.x=Math.floor(Math.random()*21)-10;
+    pos.y=Math.floor(Math.random()*21)-10;
+    do{
+      goal.x=Math.floor(Math.random()*21)-10;
+      goal.y=Math.floor(Math.random()*21)-10;
+    }while(goal.x===pos.x&&goal.y===pos.y);
+    refresh();
+  }
+  function startTimer(){
+    if(timerInt)clearInterval(timerInt);
+    secLeft=10;refresh();
+    timerInt=setInterval(()=>{
+      secLeft--;refresh();
+      if(secLeft<=0){clearInterval(timerInt);timerInt=null;alert('⌛ Too late!');}
+    },1000);
+  }
+  function addBlock(){
+    blocked.clear();
+    const x0=Math.min(pos.x,goal.x),x1=Math.max(pos.x,goal.x),
+          y0=Math.min(pos.y,goal.y),y1=Math.max(pos.y,goal.y);
+    const bx0=x0+Math.floor(Math.random()*(x1-x0+1)),
+          bx1=x0+Math.floor(Math.random()*(x1-x0+1)),
+          by0=y0+Math.floor(Math.random()*(y1-y0+1)),
+          by1=y0+Math.floor(Math.random()*(y1-y0+1));
+    for(let x=Math.min(bx0,bx1);x<=Math.max(bx0,bx1);x++){
+      for(let y=Math.min(by0,by1);y<=Math.max(by0,by1);y++){
+        blocked.add(`${x},${y}`);
+      }
+    }
+    refresh();
+  }
+  function testMe(){ alert('🧪 Quiz placeholder'); }
+
+  document.getElementById('btnLeft' ).addEventListener('pointerdown',()=>turn(-1));
+  document.getElementById('btnUp'   ).addEventListener('pointerdown',()=>step());
+  document.getElementById('btnRight').addEventListener('pointerdown',()=>turn(1));
+
+  window.addEventListener('load',()=>{
+    resize();refresh();
+  });
+  </script>
+</body>
+</html>
